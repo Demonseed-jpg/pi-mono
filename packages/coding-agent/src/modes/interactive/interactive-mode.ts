@@ -2225,7 +2225,10 @@ export class InteractiveMode {
 				break;
 
 			case "tool_execution_start": {
-				if (!this.pendingTools.has(event.toolCallId)) {
+				// Check if extensions have suppressed this tool's UI display
+				const shouldSuppress = (event as any).suppress === true;
+
+				if (!shouldSuppress && !this.pendingTools.has(event.toolCallId)) {
 					const component = new ToolExecutionComponent(
 						event.toolName,
 						event.args,
