@@ -591,7 +591,10 @@ export class AgentSession {
 				toolName: event.toolName,
 				args: event.args,
 			};
-			await this._extensionRunner.emit(extensionEvent);
+			const result = await this._extensionRunner.emitToolExecutionStart(extensionEvent);
+
+			// Add suppression info to the agent session event
+			(event as any).suppress = result?.suppress ?? false;
 		} else if (event.type === "tool_execution_update") {
 			const extensionEvent: ToolExecutionUpdateEvent = {
 				type: "tool_execution_update",
