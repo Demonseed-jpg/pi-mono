@@ -193,7 +193,7 @@ jobs:
       - name: Create PR (build passed)
         if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true' && steps.build_test.outputs.build_success == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT }}
         run: |
           BRANCH=${{ steps.branch.outputs.branch_name }}
           gh pr create \
@@ -205,7 +205,7 @@ jobs:
       - name: Create draft PR (build failed or functions not found)
         if: steps.check_upstream.outputs.has_changes == 'true' && (steps.verify.outputs.patch_viable == 'false' || steps.build_test.outputs.build_success == 'false')
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT }}
         run: |
           BRANCH=${{ steps.branch.outputs.branch_name }}
           if [ "${{ steps.verify.outputs.patch_viable }}" = "false" ]; then
