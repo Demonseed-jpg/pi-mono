@@ -20,6 +20,14 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install ast-grep
+        run: npm install -g @ast-grep/cli
+
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
@@ -46,37 +54,157 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Close old auto-upgrade PRs
           gh pr list --label auto-upgrade --state open --json number -q '.[].number' | while read pr; do
             gh pr close "$pr" --comment "Superseded by newer sync."
           done
-          # Close old auto-upgrade issues
           gh issue list --label auto-upgrade --state open --json number -q '.[].number' | while read issue; do
             gh issue close "$issue" --comment "Superseded by newer sync."
           done
 
-      - name: Create branch and apply patch
+      - name: Create branch from upstream
         if: steps.check_upstream.outputs.has_changes == 'true'
-        id: apply_patch
+        id: branch
         run: |
           BRANCH_NAME="sync-upstream-$(date +%s)"
+          git checkout -b "$BRANCH_NAME" upstream/main
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
 
-          git checkout -b "$BRANCH_NAME" upstream/main
+      - name: Verify target functions exist
+        if: steps.check_upstream.outputs.has_changes == 'true'
+        id: verify
+        run: |
+          FOUND=$(sg scan --inline-rules 'id: verify
+          language: typescript
+          rule:
+            kind: method_definition
+            has:
+              field: name
+              regex: getLatestNpmVersion|installedNpmMatchesPinnedVersion' packages/coding-agent/src/core/package-manager.ts 2>&1 | grep -c "help\[" || true)
 
-          if git apply .github/patches/registry-fix.patch; then
-            echo "patch_success=true" >> $GITHUB_OUTPUT
-            git add .
-            git commit -m "Auto-sync: upstream + registry fix patch"
+          if [ "$FOUND" -eq 2 ]; then
+            echo "patch_viable=true" >> $GITHUB_OUTPUT
           else
-            echo "patch_success=false" >> $GITHUB_OUTPUT
-            git reset --hard HEAD
+            echo "patch_viable=false" >> $GITHUB_OUTPUT
+            echo "WARNING: Expected 2 function matches, got $FOUND. Upstream structure may have changed."
           fi
 
-          git push -u origin "$BRANCH_NAME"
+      - name: Apply ast-grep patches
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true'
+        id: apply_patch
+        run: |
+          # Rule 1: installedNpmMatchesPinnedVersion - add dist-tag resolution
+          cat > /tmp/rule1.yaml << 'RULE1'
+          id: fix-installedNpmMatches
+          language: typescript
+          rule:
+            kind: method_definition
+            has:
+              field: name
+              regex: installedNpmMatchesPinnedVersion
+          fix: |2
+              private async installedNpmMatchesPinnedVersion(source: NpmSource, installedPath: string): Promise<boolean> {
+                const installedVersion = this.getInstalledNpmVersion(installedPath);
+                if (!installedVersion) {
+                  return false;
+                }
+
+                const { version: pinnedVersion } = this.parseNpmSpec(source.spec);
+                if (!pinnedVersion) {
+                  return true;
+                }
+
+                if (!pinnedVersion.includes(".")) {
+                  try {
+                    const resolvedVersion = await this.getLatestNpmVersion(source.name, pinnedVersion);
+                    return resolvedVersion === installedVersion;
+                  } catch {
+                    return false;
+                  }
+                }
+
+                return installedVersion === pinnedVersion;
+              }
+          RULE1
+
+          sg scan -r /tmp/rule1.yaml -U packages/coding-agent/src/core/package-manager.ts
+
+          # Rule 2: getLatestNpmVersion - async npm view with timeout
+          cat > /tmp/rule2.yaml << 'RULE2'
+          id: fix-getLatestNpmVersion
+          language: typescript
+          rule:
+            kind: method_definition
+            has:
+              field: name
+              regex: getLatestNpmVersion
+          fix: |2
+              private async getLatestNpmVersion(packageName: string, tag = "latest"): Promise<string> {
+                const result = await this.runCommandCapture("npm", ["view", packageName + "@" + tag, "version"], {
+                  timeoutMs: NETWORK_TIMEOUT_MS,
+                });
+                if (!result) throw new Error("No version found for " + packageName + "@" + tag);
+                return result.trim();
+              }
+          RULE2
+
+          sg scan -r /tmp/rule2.yaml -U packages/coding-agent/src/core/package-manager.ts
+
+          echo "patch_success=true" >> $GITHUB_OUTPUT
+
+      - name: Update test file
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true'
+        run: |
+          python3 << 'PYEOF'
+          import re
+
+          with open("packages/coding-agent/test/package-manager.test.ts", "r") as f:
+              content = f.read()
+
+          old_test = '''		it("should pass an AbortSignal timeout when fetching npm latest version", async () => {
+          			const fetchMock = vi.fn().mockResolvedValue({
+          				ok: true,
+          				json: async () => ({ version: "1.2.3" }),
+          			});
+          			vi.stubGlobal("fetch", fetchMock);
+
+          			const latest = await (packageManager as any).getLatestNpmVersion("example");
+          			expect(latest).toBe("1.2.3");
+          			expect(fetchMock).toHaveBeenCalledTimes(1);
+
+          			const [, options] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
+          			expect(options?.signal).toBeDefined();
+          		});'''
+
+          new_test = '''		it("should pass a timeout when fetching npm latest version", async () => {
+          			const captureMock = vi.spyOn(packageManager as any, "runCommandCapture").mockResolvedValue("1.2.3");
+
+          			const latest = await (packageManager as any).getLatestNpmVersion("example");
+          			expect(latest).toBe("1.2.3");
+          			expect(captureMock).toHaveBeenCalledTimes(1);
+
+          			const [, args, options] = captureMock.mock.calls[0] as [string, string[], { timeoutMs?: number }];
+          			expect(args).toEqual(["view", "example@latest", "version"]);
+          			expect(options?.timeoutMs).toBeDefined();
+          		});'''
+
+          if old_test in content:
+              content = content.replace(old_test, new_test)
+              with open("packages/coding-agent/test/package-manager.test.ts", "w") as f:
+                  f.write(content)
+              print("Test updated")
+          else:
+              print("WARNING: Test pattern not found, may already be fixed or changed")
+          PYEOF
+
+      - name: Commit changes
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true'
+        run: |
+          git add packages/coding-agent/src/core/package-manager.ts packages/coding-agent/test/package-manager.test.ts
+          git commit -m "Auto-sync: upstream + registry fix (ast-grep applied)"
+          git push -u origin "${{ steps.branch.outputs.branch_name }}"
 
       - name: Build and test
-        if: steps.check_upstream.outputs.has_changes == 'true' && steps.apply_patch.outputs.patch_success == 'true'
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true'
         id: build_test
         run: |
           npm ci
@@ -86,52 +214,53 @@ jobs:
             echo "build_success=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create PR and auto-merge (clean patch + build passed)
-        if: steps.check_upstream.outputs.has_changes == 'true' && steps.apply_patch.outputs.patch_success == 'true' && steps.build_test.outputs.build_success == 'true'
+      - name: Create PR and auto-merge (clean + build passed)
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true' && steps.build_test.outputs.build_success == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BRANCH=${{ steps.apply_patch.outputs.branch_name }}
+          BRANCH=${{ steps.branch.outputs.branch_name }}
           gh pr create \
             --title "Auto-Sync: Upstream updates + registry patch" \
-            --body "Upstream updated. Patch applied cleanly. Build and tests passed. Auto-merging on CI pass." \
+            --body "Upstream updated. ast-grep patches applied. Build and tests passed. Auto-merging on CI pass." \
             --base main \
             --head "$BRANCH" \
             --label auto-upgrade
           gh pr merge "$BRANCH" --auto --squash --delete-branch
 
       - name: Open issue (patch applied but build failed)
-        if: steps.check_upstream.outputs.has_changes == 'true' && steps.apply_patch.outputs.patch_success == 'true' && steps.build_test.outputs.build_success == 'false'
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true' && steps.build_test.outputs.build_success == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BRANCH=${{ steps.apply_patch.outputs.branch_name }}
+          BRANCH=${{ steps.branch.outputs.branch_name }}
           PR_URL=$(gh pr create \
             --title "⚠️ Upstream sync: patch applied but build failed" \
-            --body "Upstream updated. Patch applied cleanly but build/test failed. Manual fix needed on \`$BRANCH\`." \
+            --body "Upstream updated. ast-grep patches applied but build/test failed. Manual fix needed on \`$BRANCH\`." \
             --base main \
             --head "$BRANCH" \
             --draft \
             --label auto-upgrade)
           gh issue create \
             --title "Build failed after upstream sync" \
-            --body "Patch applied but build/test failed. Draft PR: $PR_URL" \
+            --body "ast-grep patches applied but build/test failed. Draft PR: $PR_URL" \
             --label auto-upgrade
 
-      - name: Open issue (patch conflict)
-        if: steps.check_upstream.outputs.has_changes == 'true' && steps.apply_patch.outputs.patch_success == 'false'
+      - name: Open issue (functions not found)
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BRANCH=${{ steps.apply_patch.outputs.branch_name }}
+          BRANCH=${{ steps.branch.outputs.branch_name }}
+          git push -u origin "$BRANCH"
           PR_URL=$(gh pr create \
-            --title "⚠️ ACTION REQUIRED: upstream sync patch conflict" \
-            --body "Upstream updated but \`registry-fix.patch\` conflicted. Branch \`$BRANCH\` is clean upstream. Resolve manually." \
+            --title "⚠️ ACTION REQUIRED: upstream sync - target functions changed" \
+            --body "Upstream updated but ast-grep could not find \`installedNpmMatchesPinnedVersion\` or \`getLatestNpmVersion\`. Upstream may have restructured the code. Branch \`$BRANCH\` is clean upstream. Manual patch needed." \
             --base main \
             --head "$BRANCH" \
             --draft \
             --label auto-upgrade)
           gh issue create \
-            --title "Patch conflict during upstream sync" \
-            --body "Registry patch conflicted with upstream changes. Draft PR: $PR_URL" \
+            --title "Upstream restructured package-manager.ts" \
+            --body "Target functions not found by ast-grep. Manual review needed. Draft PR: $PR_URL" \
             --label auto-upgrade
