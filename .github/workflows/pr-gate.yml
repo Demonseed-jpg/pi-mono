@@ -6,6 +6,7 @@ on:
 
 jobs:
   check-contributor:
+    if: ${{ !contains(github.event.pull_request.title, 'Auto-Sync') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

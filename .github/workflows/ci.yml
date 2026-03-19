@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   build-check-test:
+    if: ${{ !contains(github.event.pull_request.title, 'Auto-Sync') || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
