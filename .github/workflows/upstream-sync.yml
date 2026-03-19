@@ -224,8 +224,9 @@ jobs:
             --title "Auto-Sync: Upstream updates + registry patch" \
             --body "Upstream updated. ast-grep patches applied. Build and tests passed. Auto-merging on CI pass." \
             --base main \
-            --head "$BRANCH" \
-            --label auto-upgrade
+            --head "$BRANCH"
+          PR_NUMBER=$(gh pr list --head "$BRANCH" --json number -q '.[0].number')
+          gh pr edit "$PR_NUMBER" --add-label auto-upgrade
           gh pr merge "$BRANCH" --auto --squash --delete-branch
 
       - name: Open issue (patch applied but build failed)
@@ -240,7 +241,7 @@ jobs:
             --base main \
             --head "$BRANCH" \
             --draft \
-            --label auto-upgrade)
+            --label auto-upgrade || true)
           gh issue create \
             --title "Build failed after upstream sync" \
             --body "ast-grep patches applied but build/test failed. Draft PR: $PR_URL" \
@@ -259,7 +260,7 @@ jobs:
             --base main \
             --head "$BRANCH" \
             --draft \
-            --label auto-upgrade)
+            --label auto-upgrade || true)
           gh issue create \
             --title "Upstream restructured package-manager.ts" \
             --body "Target functions not found by ast-grep. Manual review needed. Draft PR: $PR_URL" \
