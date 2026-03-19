@@ -190,19 +190,20 @@ jobs:
             echo "build_success=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create PR (build passed)
+      - name: Create PR and enable auto-merge (build passed)
         if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true' && steps.build_test.outputs.build_success == 'true'
         env:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
           BRANCH=${{ steps.branch.outputs.branch_name }}
-          gh pr create \
+          PR_URL=$(gh pr create \
             --repo ${{ github.repository }} \
             --title "Auto-Sync: Upstream updates + registry patch" \
             --body "Upstream updated. ast-grep patches applied. Build and tests passed. Auto-merges when CI passes." \
             --base main \
-            --head "$BRANCH"
-          gh pr merge "$BRANCH" --repo ${{ github.repository }} --auto --squash --delete-branch
+            --head "$BRANCH")
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+          gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --auto --squash
 
       - name: Create draft PR (build failed or functions not found)
         if: steps.check_upstream.outputs.has_changes == 'true' && (steps.verify.outputs.patch_viable == 'false' || steps.build_test.outputs.build_success == 'false')
