@@ -1149,6 +1149,17 @@ export class DefaultPackageManager implements PackageManager {
 			return true;
 		}
 
+		// Dist-tags (nightly, latest, beta) don't contain dots — resolve from registry
+		if (!pinnedVersion.includes(".")) {
+			try {
+				const resolvedVersion = await this.getLatestNpmVersion(source.name, pinnedVersion);
+				return resolvedVersion === installedVersion;
+			} catch {
+				return false;
+			}
+		}
+
+		// Exact semver comparison
 		return installedVersion === pinnedVersion;
 	}
 
