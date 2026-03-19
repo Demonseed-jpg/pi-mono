@@ -196,7 +196,15 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
           BRANCH=${{ steps.branch.outputs.branch_name }}
+          echo "Creating PR for branch: $BRANCH"
+          echo "Auth status:"
+          gh auth status
+          echo "Branch on remote:"
+          gh api repos/${{ github.repository }}/branches/$BRANCH --jq '.commit.sha' || echo "Branch not found"
+          echo "Main on remote:"
+          gh api repos/${{ github.repository }}/branches/main --jq '.commit.sha'
           gh pr create \
+            --repo ${{ github.repository }} \
             --title "Auto-Sync: Upstream updates + registry patch" \
             --body "Upstream updated. ast-grep patches applied. Build and tests passed." \
             --base main \
