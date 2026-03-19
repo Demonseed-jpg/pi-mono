@@ -1399,19 +1399,16 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			expect(gitUpdateSpy).not.toHaveBeenCalled();
 		});
 
-		it("should pass an AbortSignal timeout when fetching npm latest version", async () => {
-			const fetchMock = vi.fn().mockResolvedValue({
-				ok: true,
-				json: async () => ({ version: "1.2.3" }),
-			});
-			vi.stubGlobal("fetch", fetchMock);
+		it("should pass a timeout when fetching npm latest version", async () => {
+			const captureMock = vi.spyOn(packageManager as any, "runCommandCapture").mockResolvedValue("1.2.3");
 
 			const latest = await (packageManager as any).getLatestNpmVersion("example");
 			expect(latest).toBe("1.2.3");
-			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(captureMock).toHaveBeenCalledTimes(1);
 
-			const [, options] = fetchMock.mock.calls[0] as [string, RequestInit | undefined];
-			expect(options?.signal).toBeDefined();
+			const [, args, options] = captureMock.mock.calls[0] as [string, string[], { timeoutMs?: number }];
+			expect(args).toEqual(["view", "example@latest", "version"]);
+			expect(options?.timeoutMs).toBeDefined();
 		});
 	});
 });
