@@ -8,7 +8,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 jobs:
   sync-and-patch:
@@ -49,18 +48,6 @@ jobs:
             echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Close old auto-upgrade issues and PRs
-        if: steps.check_upstream.outputs.has_changes == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr list --label auto-upgrade --state open --json number -q '.[].number' | while read pr; do
-            gh pr close "$pr" --comment "Superseded by newer sync."
-          done
-          gh issue list --label auto-upgrade --state open --json number -q '.[].number' | while read issue; do
-            gh issue close "$issue" --comment "Superseded by newer sync."
-          done
-
       - name: Create branch from upstream
         if: steps.check_upstream.outputs.has_changes == 'true'
         id: branch
@@ -85,14 +72,11 @@ jobs:
             echo "patch_viable=true" >> $GITHUB_OUTPUT
           else
             echo "patch_viable=false" >> $GITHUB_OUTPUT
-            echo "WARNING: Expected 2 function matches, got $FOUND. Upstream structure may have changed."
           fi
 
       - name: Apply ast-grep patches
         if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true'
-        id: apply_patch
         run: |
-          # Rule 1: installedNpmMatchesPinnedVersion - add dist-tag resolution
           cat > /tmp/rule1.yaml << 'RULE1'
           id: fix-installedNpmMatches
           language: typescript
@@ -128,7 +112,6 @@ jobs:
 
           sg scan -r /tmp/rule1.yaml -U packages/coding-agent/src/core/package-manager.ts
 
-          # Rule 2: getLatestNpmVersion - async npm view with timeout
           cat > /tmp/rule2.yaml << 'RULE2'
           id: fix-getLatestNpmVersion
           language: typescript
@@ -149,14 +132,10 @@ jobs:
 
           sg scan -r /tmp/rule2.yaml -U packages/coding-agent/src/core/package-manager.ts
 
-          echo "patch_success=true" >> $GITHUB_OUTPUT
-
       - name: Update test file
         if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true'
         run: |
           python3 << 'PYEOF'
-          import re
-
           with open("packages/coding-agent/test/package-manager.test.ts", "r") as f:
               content = f.read()
 
@@ -191,12 +170,9 @@ jobs:
               content = content.replace(old_test, new_test)
               with open("packages/coding-agent/test/package-manager.test.ts", "w") as f:
                   f.write(content)
-              print("Test updated")
-          else:
-              print("WARNING: Test pattern not found, may already be fixed or changed")
           PYEOF
 
-      - name: Commit changes
+      - name: Commit and push
         if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true'
         run: |
           git add packages/coding-agent/src/core/package-manager.ts packages/coding-agent/test/package-manager.test.ts
@@ -214,7 +190,7 @@ jobs:
             echo "build_success=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create PR and auto-merge (clean + build passed)
+      - name: Create PR (build passed)
         if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true' && steps.build_test.outputs.build_success == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -222,46 +198,26 @@ jobs:
           BRANCH=${{ steps.branch.outputs.branch_name }}
           gh pr create \
             --title "Auto-Sync: Upstream updates + registry patch" \
-            --body "Upstream updated. ast-grep patches applied. Build and tests passed. Auto-merging on CI pass." \
+            --body "Upstream updated. ast-grep patches applied. Build and tests passed." \
             --base main \
             --head "$BRANCH"
-          PR_NUMBER=$(gh pr list --head "$BRANCH" --json number -q '.[0].number')
-          gh pr edit "$PR_NUMBER" --add-label auto-upgrade
-          gh pr merge "$BRANCH" --auto --squash --delete-branch
 
-      - name: Open issue (patch applied but build failed)
-        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'true' && steps.build_test.outputs.build_success == 'false'
+      - name: Create draft PR (build failed or functions not found)
+        if: steps.check_upstream.outputs.has_changes == 'true' && (steps.verify.outputs.patch_viable == 'false' || steps.build_test.outputs.build_success == 'false')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BRANCH=${{ steps.branch.outputs.branch_name }}
-          PR_URL=$(gh pr create \
-            --title "⚠️ Upstream sync: patch applied but build failed" \
-            --body "Upstream updated. ast-grep patches applied but build/test failed. Manual fix needed on \`$BRANCH\`." \
+          if [ "${{ steps.verify.outputs.patch_viable }}" = "false" ]; then
+            TITLE="⚠️ Upstream sync: target functions changed"
+            BODY="Upstream restructured package-manager.ts. Manual patch needed on \`$BRANCH\`."
+          else
+            TITLE="⚠️ Upstream sync: build failed"
+            BODY="ast-grep patches applied but build/test failed. Manual fix needed on \`$BRANCH\`."
+          fi
+          gh pr create \
+            --title "$TITLE" \
+            --body "$BODY" \
             --base main \
             --head "$BRANCH" \
-            --draft \
-            --label auto-upgrade || true)
-          gh issue create \
-            --title "Build failed after upstream sync" \
-            --body "ast-grep patches applied but build/test failed. Draft PR: $PR_URL" \
-            --label auto-upgrade
-
-      - name: Open issue (functions not found)
-        if: steps.check_upstream.outputs.has_changes == 'true' && steps.verify.outputs.patch_viable == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BRANCH=${{ steps.branch.outputs.branch_name }}
-          git push -u origin "$BRANCH"
-          PR_URL=$(gh pr create \
-            --title "⚠️ ACTION REQUIRED: upstream sync - target functions changed" \
-            --body "Upstream updated but ast-grep could not find \`installedNpmMatchesPinnedVersion\` or \`getLatestNpmVersion\`. Upstream may have restructured the code. Branch \`$BRANCH\` is clean upstream. Manual patch needed." \
-            --base main \
-            --head "$BRANCH" \
-            --draft \
-            --label auto-upgrade || true)
-          gh issue create \
-            --title "Upstream restructured package-manager.ts" \
-            --body "Target functions not found by ast-grep. Manual review needed. Draft PR: $PR_URL" \
-            --label auto-upgrade
+            --draft
