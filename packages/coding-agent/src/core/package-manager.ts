@@ -1195,7 +1195,10 @@ export class DefaultPackageManager implements PackageManager {
 
 	private async getLatestNpmVersion(packageName: string, tag = "latest"): Promise<string> {
 		// Use npm view to respect .npmrc registry config (e.g. GitHub Packages)
-		const result = this.runCommandSync("npm", ["view", `${packageName}@${tag}`, "version"]);
+		// Uses async runCommandCapture to avoid blocking the event loop
+		const result = await this.runCommandCapture("npm", ["view", `${packageName}@${tag}`, "version"], {
+			timeoutMs: NETWORK_TIMEOUT_MS,
+		});
 		if (!result) throw new Error(`No version found for ${packageName}@${tag}`);
 		return result.trim();
 	}
