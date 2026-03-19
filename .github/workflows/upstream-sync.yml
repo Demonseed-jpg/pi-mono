@@ -1,0 +1,137 @@
+name: Upstream Sync & Auto-Patch
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync-and-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/badlogic/pi-mono.git
+          git fetch upstream main
+
+      - name: Check if upstream has new commits
+        id: check_upstream
+        run: |
+          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+          LOCAL_COMMIT=$(git rev-parse HEAD)
+          if [ "$UPSTREAM_COMMIT" = "$LOCAL_COMMIT" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Close old auto-upgrade issues and PRs
+        if: steps.check_upstream.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Close old auto-upgrade PRs
+          gh pr list --label auto-upgrade --state open --json number -q '.[].number' | while read pr; do
+            gh pr close "$pr" --comment "Superseded by newer sync."
+          done
+          # Close old auto-upgrade issues
+          gh issue list --label auto-upgrade --state open --json number -q '.[].number' | while read issue; do
+            gh issue close "$issue" --comment "Superseded by newer sync."
+          done
+
+      - name: Create branch and apply patch
+        if: steps.check_upstream.outputs.has_changes == 'true'
+        id: apply_patch
+        run: |
+          BRANCH_NAME="sync-upstream-$(date +%s)"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          git checkout -b "$BRANCH_NAME" upstream/main
+
+          if git apply .github/patches/registry-fix.patch; then
+            echo "patch_success=true" >> $GITHUB_OUTPUT
+            git add .
+            git commit -m "Auto-sync: upstream + registry fix patch"
+          else
+            echo "patch_success=false" >> $GITHUB_OUTPUT
+            git reset --hard HEAD
+          fi
+
+          git push -u origin "$BRANCH_NAME"
+
+      - name: Build and test
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.apply_patch.outputs.patch_success == 'true'
+        id: build_test
+        run: |
+          npm ci
+          if npm run build && npm test; then
+            echo "build_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "build_success=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR and auto-merge (clean patch + build passed)
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.apply_patch.outputs.patch_success == 'true' && steps.build_test.outputs.build_success == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH=${{ steps.apply_patch.outputs.branch_name }}
+          gh pr create \
+            --title "Auto-Sync: Upstream updates + registry patch" \
+            --body "Upstream updated. Patch applied cleanly. Build and tests passed. Auto-merging on CI pass." \
+            --base main \
+            --head "$BRANCH" \
+            --label auto-upgrade
+          gh pr merge "$BRANCH" --auto --squash --delete-branch
+
+      - name: Open issue (patch applied but build failed)
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.apply_patch.outputs.patch_success == 'true' && steps.build_test.outputs.build_success == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH=${{ steps.apply_patch.outputs.branch_name }}
+          PR_URL=$(gh pr create \
+            --title "⚠️ Upstream sync: patch applied but build failed" \
+            --body "Upstream updated. Patch applied cleanly but build/test failed. Manual fix needed on \`$BRANCH\`." \
+            --base main \
+            --head "$BRANCH" \
+            --draft \
+            --label auto-upgrade)
+          gh issue create \
+            --title "Build failed after upstream sync" \
+            --body "Patch applied but build/test failed. Draft PR: $PR_URL" \
+            --label auto-upgrade
+
+      - name: Open issue (patch conflict)
+        if: steps.check_upstream.outputs.has_changes == 'true' && steps.apply_patch.outputs.patch_success == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH=${{ steps.apply_patch.outputs.branch_name }}
+          PR_URL=$(gh pr create \
+            --title "⚠️ ACTION REQUIRED: upstream sync patch conflict" \
+            --body "Upstream updated but \`registry-fix.patch\` conflicted. Branch \`$BRANCH\` is clean upstream. Resolve manually." \
+            --base main \
+            --head "$BRANCH" \
+            --draft \
+            --label auto-upgrade)
+          gh issue create \
+            --title "Patch conflict during upstream sync" \
+            --body "Registry patch conflicted with upstream changes. Draft PR: $PR_URL" \
+            --label auto-upgrade
