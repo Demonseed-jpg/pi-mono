@@ -1149,6 +1149,17 @@ export class DefaultPackageManager implements PackageManager {
 			return true;
 		}
 
+		// Dist-tags (nightly, latest, beta) don't contain dots — resolve from registry
+		if (!pinnedVersion.includes(".")) {
+			try {
+				const resolvedVersion = await this.getLatestNpmVersion(source.name, pinnedVersion);
+				return resolvedVersion === installedVersion;
+			} catch {
+				return false;
+			}
+		}
+
+		// Exact semver comparison
 		return installedVersion === pinnedVersion;
 	}
 
@@ -1182,13 +1193,11 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async getLatestNpmVersion(packageName: string): Promise<string> {
-		const response = await fetch(`https://registry.npmjs.org/${packageName}/latest`, {
-			signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
-		});
-		if (!response.ok) throw new Error(`Failed to fetch npm registry: ${response.status}`);
-		const data = (await response.json()) as { version: string };
-		return data.version;
+	private async getLatestNpmVersion(packageName: string, tag = "latest"): Promise<string> {
+		// Use npm view to respect .npmrc registry config (e.g. GitHub Packages)
+		const result = this.runCommandSync("npm", ["view", `${packageName}@${tag}`, "version"]);
+		if (!result) throw new Error(`No version found for ${packageName}@${tag}`);
+		return result.trim();
 	}
 
 	private async gitHasAvailableUpdate(installedPath: string): Promise<boolean> {
