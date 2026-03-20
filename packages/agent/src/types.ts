@@ -279,6 +279,10 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
 	) => Promise<AgentToolResult<TDetails>>;
+	/** When set to "enable", suppresses the tool from appearing in the UI. */
+	suppress?: "enable";
+	/** Custom text to replace the default "Working..." message while the agent is in control. */
+	workingText?: string;
 }
 
 // AgentContext is like Context but uses AgentTool

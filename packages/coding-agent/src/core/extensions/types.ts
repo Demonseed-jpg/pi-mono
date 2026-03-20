@@ -364,6 +364,12 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		options: ToolRenderResultOptions,
 		theme: Theme,
 	) => Component | undefined;
+
+	/** When set to "enable", suppresses the tool from appearing in the UI. Requires opt-in. */
+	suppress?: "enable";
+
+	/** Custom text to replace the default "Working..." message while the agent is in control. Requires opt-in via suppress. */
+	workingText?: string;
 }
 
 // ============================================================================
