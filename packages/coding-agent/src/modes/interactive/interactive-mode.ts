@@ -161,6 +161,7 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private loadingAnimation: Loader | undefined = undefined;
+	private toolWorkingTextLoader: Loader | undefined = undefined;
 	private pendingWorkingMessage: string | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
 
@@ -177,7 +178,7 @@ export class InteractiveMode {
 	private streamingMessage: AssistantMessage | undefined = undefined;
 
 	// Tool execution tracking: toolCallId -> component
-	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private pendingTools = new Map<string, ToolExecutionComponent | null>();
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2196,13 +2197,20 @@ export class InteractiveMode {
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
 							if (!this.pendingTools.has(content.id)) {
+								const toolDef = this.getRegisteredToolDefinition(content.name);
+								// Skip rendering if tool has suppress enabled
+								if (toolDef?.suppress === "enable") {
+									// Track as suppressed (null component) so we don't re-check
+									this.pendingTools.set(content.id, null as any);
+									continue;
+								}
 								const component = new ToolExecutionComponent(
 									content.name,
 									content.arguments,
 									{
 										showImages: this.settingsManager.getShowImages(),
 									},
-									this.getRegisteredToolDefinition(content.name),
+									toolDef,
 									this.ui,
 								);
 								component.setExpanded(this.toolOutputExpanded);
@@ -2240,16 +2248,20 @@ export class InteractiveMode {
 							errorMessage = this.streamingMessage.errorMessage || "Error";
 						}
 						for (const [, component] of this.pendingTools.entries()) {
-							component.updateResult({
-								content: [{ type: "text", text: errorMessage }],
-								isError: true,
-							});
+							if (component) {
+								component.updateResult({
+									content: [{ type: "text", text: errorMessage }],
+									isError: true,
+								});
+							}
 						}
 						this.pendingTools.clear();
 					} else {
 						// Args are now complete - trigger diff computation for edit tools
 						for (const [, component] of this.pendingTools.entries()) {
-							component.setArgsComplete();
+							if (component) {
+								component.setArgsComplete();
+							}
 						}
 					}
 					this.streamingComponent = undefined;
@@ -2260,6 +2272,25 @@ export class InteractiveMode {
 				break;
 
 			case "tool_execution_start": {
+				const toolDef = this.getRegisteredToolDefinition(event.toolName);
+				// Create a separate loader for tool working text (below the main loader)
+				if (toolDef?.workingText) {
+					if (this.toolWorkingTextLoader) {
+						this.toolWorkingTextLoader.stop();
+					}
+					this.toolWorkingTextLoader = new Loader(
+						this.ui,
+						(spinner) => theme.fg("accent", spinner),
+						(text) => theme.fg("muted", text),
+						toolDef.workingText,
+					);
+					this.statusContainer.addChild(this.toolWorkingTextLoader);
+				}
+				// Skip rendering if tool has suppress enabled
+				if (toolDef?.suppress === "enable") {
+					this.pendingTools.set(event.toolCallId, null as any);
+					break;
+				}
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
 					component = new ToolExecutionComponent(
@@ -2268,7 +2299,7 @@ export class InteractiveMode {
 						{
 							showImages: this.settingsManager.getShowImages(),
 						},
-						this.getRegisteredToolDefinition(event.toolName),
+						toolDef,
 						this.ui,
 					);
 					component.setExpanded(this.toolOutputExpanded);
@@ -2293,7 +2324,15 @@ export class InteractiveMode {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
-					this.pendingTools.delete(event.toolCallId);
+				}
+				this.pendingTools.delete(event.toolCallId);
+				// Remove tool working text loader when no more tools are pending
+				if (this.pendingTools.size === 0 && this.toolWorkingTextLoader) {
+					this.toolWorkingTextLoader.stop();
+					this.statusContainer.removeChild(this.toolWorkingTextLoader);
+					this.toolWorkingTextLoader = undefined;
+				}
+				if (component) {
 					this.ui.requestRender();
 				}
 				break;
@@ -2303,8 +2342,12 @@ export class InteractiveMode {
 				if (this.loadingAnimation) {
 					this.loadingAnimation.stop();
 					this.loadingAnimation = undefined;
-					this.statusContainer.clear();
 				}
+				if (this.toolWorkingTextLoader) {
+					this.toolWorkingTextLoader.stop();
+					this.toolWorkingTextLoader = undefined;
+				}
+				this.statusContainer.clear();
 				if (this.streamingComponent) {
 					this.chatContainer.removeChild(this.streamingComponent);
 					this.streamingComponent = undefined;

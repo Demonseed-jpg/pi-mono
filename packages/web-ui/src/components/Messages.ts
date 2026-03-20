@@ -115,6 +115,10 @@ export class AssistantMessage extends LitElement {
 			} else if (chunk.type === "toolCall") {
 				if (!this.hideToolCalls) {
 					const tool = this.tools?.find((t) => t.name === chunk.name);
+					// Skip rendering if tool has suppress enabled
+					if (tool?.suppress === "enable") {
+						continue;
+					}
 					const pending = this.pendingToolCalls?.has(chunk.id) ?? false;
 					const result = this.toolResultsById?.get(chunk.id);
 					// Skip rendering pending tool calls when hidePendingToolCalls is true
