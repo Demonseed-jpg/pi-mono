@@ -370,6 +370,19 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 
 	/** Custom text to replace the default "Working..." message while the agent is in control. Requires opt-in via suppress. */
 	workingText?: string;
+
+	/**
+	 * Async execution mode.
+	 *
+	 * - `"opt-in"`: agent can pass `async: true` in the tool call to run in background.
+	 *   The `async` parameter is injected into the tool schema sent to the LLM.
+	 * - `"always"`: tool always runs in background. No `async` parameter exposed to the LLM.
+	 *   The agent gets a pending placeholder immediately and the real result injects later.
+	 * - `undefined`: not async-capable (default).
+	 *
+	 * Composes with `suppress` and `workingText` — all three flags are independent.
+	 */
+	async?: import("@mariozechner/pi-agent-core").ToolAsyncMode;
 }
 
 // ============================================================================

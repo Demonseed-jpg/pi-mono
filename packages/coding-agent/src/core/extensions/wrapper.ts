@@ -24,6 +24,7 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: Exten
 			definition.execute(toolCallId, params, signal, onUpdate, runner.createContext()),
 		suppress: definition.suppress,
 		workingText: definition.workingText,
+		async: definition.async,
 	};
 }
 

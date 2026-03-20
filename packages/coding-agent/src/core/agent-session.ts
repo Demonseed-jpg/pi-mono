@@ -360,6 +360,28 @@ export class AgentSession {
 				details: hookResult.details,
 			};
 		});
+
+		// Wire up async tool completion — feed results back via followUp
+		this.agent.setOnAsyncToolComplete((result) => {
+			// Build a text representation of the result for the followUp message
+			const textParts = result.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text);
+			const resultText = textParts.join("\n") || "(async tool completed with no text output)";
+
+			// Queue as a followUp message so the agent sees it on its next turn
+			const message: AgentMessage = {
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: `[Background tool result for ${result.toolName} (call ${result.toolCallId})]:\n${resultText}`,
+					},
+				],
+				timestamp: Date.now(),
+			};
+			this.agent.followUp(message);
+		});
 	}
 
 	// =========================================================================

@@ -161,6 +161,9 @@ async function runLoop(
 	streamFn?: StreamFn,
 ): Promise<void> {
 	let firstTurn = true;
+	// Track pending background async tool executions
+	const asyncToolPromises: Promise<void>[] = [];
+
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -192,6 +195,11 @@ async function runLoop(
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				// Wait for any background async tools before ending
+				if (asyncToolPromises.length > 0) {
+					await Promise.all(asyncToolPromises);
+					asyncToolPromises.length = 0;
+				}
 				await emit({ type: "turn_end", message, toolResults: [] });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -203,7 +211,9 @@ async function runLoop(
 
 			const toolResults: ToolResultMessage[] = [];
 			if (hasMoreToolCalls) {
-				toolResults.push(...(await executeToolCalls(currentContext, message, config, signal, emit)));
+				const { results, asyncPromises } = await executeToolCalls(currentContext, message, config, signal, emit);
+				toolResults.push(...results);
+				asyncToolPromises.push(...asyncPromises);
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
@@ -216,7 +226,14 @@ async function runLoop(
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
 		}
 
-		// Agent would stop here. Check for follow-up messages.
+		// Agent would stop here. Wait for any background async tools to complete.
+		// onAsyncToolComplete will queue followUp messages which we check below.
+		if (asyncToolPromises.length > 0) {
+			await Promise.all(asyncToolPromises);
+			asyncToolPromises.length = 0;
+		}
+
+		// Check for follow-up messages (including those queued by async tool completions).
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
@@ -330,6 +347,11 @@ async function streamAssistantResponse(
 	return finalMessage;
 }
 
+type ToolCallsResult = {
+	results: ToolResultMessage[];
+	asyncPromises: Promise<void>[];
+};
+
 /**
  * Execute tool calls from an assistant message.
  */
@@ -339,12 +361,100 @@ async function executeToolCalls(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-): Promise<ToolResultMessage[]> {
+): Promise<ToolCallsResult> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	if (config.toolExecution === "sequential") {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
 	}
 	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
+}
+
+/**
+ * Determine if a tool call should run in async (background) mode.
+ * Returns the async mode if applicable, or null for synchronous execution.
+ */
+function resolveAsyncMode(toolCall: AgentToolCall, tool: AgentTool<any>): "opt-in" | "always" | null {
+	if (tool.async === "always") return "always";
+	if (tool.async === "opt-in") {
+		const asyncArg = toolCall.arguments?.async;
+		// Handle both boolean true and string "true"/"True" from LLM
+		if (asyncArg === true || asyncArg === "true" || asyncArg === "True") return "opt-in";
+	}
+	return null;
+}
+
+/**
+ * Create a placeholder result for an async tool that is running in the background.
+ */
+function createPendingToolResult(toolCall: AgentToolCall, tool: AgentTool<any>): AgentToolResult<any> {
+	const workingText = tool.workingText || `${tool.label || toolCall.name} is running in the background...`;
+	return {
+		content: [{ type: "text", text: workingText }],
+		details: { status: "pending", toolCallId: toolCall.id },
+	};
+}
+
+/**
+ * Execute an async tool in the background.
+ * Returns a promise that resolves when the tool completes.
+ * Emits events for updates and completion, then calls onAsyncToolComplete with the result.
+ */
+function executeAsyncToolInBackground(
+	prepared: PreparedToolCall,
+	_toolCall: AgentToolCall,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	config: AgentLoopConfig,
+): Promise<void> {
+	return (async () => {
+		const updateEvents: Promise<void>[] = [];
+		let result: AgentToolResult<any>;
+		let isError = false;
+
+		try {
+			result = await prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
+				updateEvents.push(
+					Promise.resolve(
+						emit({
+							type: "tool_execution_update",
+							toolCallId: prepared.toolCall.id,
+							toolName: prepared.toolCall.name,
+							args: prepared.toolCall.arguments,
+							partialResult,
+						}),
+					),
+				);
+			});
+		} catch (error) {
+			result = createErrorToolResult(error instanceof Error ? error.message : String(error));
+			isError = true;
+		}
+
+		await Promise.all(updateEvents);
+
+		// Emit the real tool_execution_end event
+		await emit({
+			type: "tool_execution_end",
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			result,
+			isError,
+		});
+
+		// Build the ToolResultMessage for the caller to inject
+		const toolResultMessage: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			content: result.content,
+			details: result.details,
+			isError,
+			timestamp: Date.now(),
+		};
+
+		// Notify caller that the async tool completed
+		config.onAsyncToolComplete?.(toolResultMessage);
+	})();
 }
 
 async function executeToolCallsSequential(
@@ -354,8 +464,9 @@ async function executeToolCallsSequential(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-): Promise<ToolResultMessage[]> {
+): Promise<ToolCallsResult> {
 	const results: ToolResultMessage[] = [];
+	const asyncPromises: Promise<void>[] = [];
 
 	for (const toolCall of toolCalls) {
 		await emit({
@@ -369,22 +480,33 @@ async function executeToolCallsSequential(
 		if (preparation.kind === "immediate") {
 			results.push(await emitToolCallOutcome(toolCall, preparation.result, preparation.isError, emit));
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
-			results.push(
-				await finalizeExecutedToolCall(
-					currentContext,
-					assistantMessage,
-					preparation,
-					executed,
-					config,
-					signal,
-					emit,
-				),
-			);
+			// Check if this tool should run async
+			const asyncMode = resolveAsyncMode(toolCall, preparation.tool);
+			if (asyncMode) {
+				// Start execution in background, track the promise
+				const asyncPromise = executeAsyncToolInBackground(preparation, toolCall, signal, emit, config);
+				asyncPromises.push(asyncPromise);
+				// Return pending placeholder immediately
+				const pendingResult = createPendingToolResult(toolCall, preparation.tool);
+				results.push(await emitToolCallOutcome(toolCall, pendingResult, false, emit));
+			} else {
+				const executed = await executePreparedToolCall(preparation, signal, emit);
+				results.push(
+					await finalizeExecutedToolCall(
+						currentContext,
+						assistantMessage,
+						preparation,
+						executed,
+						config,
+						signal,
+						emit,
+					),
+				);
+			}
 		}
 	}
 
-	return results;
+	return { results, asyncPromises };
 }
 
 async function executeToolCallsParallel(
@@ -394,8 +516,9 @@ async function executeToolCallsParallel(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-): Promise<ToolResultMessage[]> {
+): Promise<ToolCallsResult> {
 	const results: ToolResultMessage[] = [];
+	const asyncPromises: Promise<void>[] = [];
 	const runnableCalls: PreparedToolCall[] = [];
 
 	for (const toolCall of toolCalls) {
@@ -410,7 +533,18 @@ async function executeToolCallsParallel(
 		if (preparation.kind === "immediate") {
 			results.push(await emitToolCallOutcome(toolCall, preparation.result, preparation.isError, emit));
 		} else {
-			runnableCalls.push(preparation);
+			// Check if this tool should run async
+			const asyncMode = resolveAsyncMode(toolCall, preparation.tool);
+			if (asyncMode) {
+				// Start execution in background, track the promise
+				const asyncPromise = executeAsyncToolInBackground(preparation, toolCall, signal, emit, config);
+				asyncPromises.push(asyncPromise);
+				// Return pending placeholder immediately
+				const pendingResult = createPendingToolResult(toolCall, preparation.tool);
+				results.push(await emitToolCallOutcome(toolCall, pendingResult, false, emit));
+			} else {
+				runnableCalls.push(preparation);
+			}
 		}
 	}
 
@@ -434,7 +568,7 @@ async function executeToolCallsParallel(
 		);
 	}
 
-	return results;
+	return { results, asyncPromises };
 }
 
 type PreparedToolCall = {
@@ -472,7 +606,11 @@ async function prepareToolCall(
 	}
 
 	try {
-		const validatedArgs = validateToolArguments(tool, toolCall);
+		// Strip `async` from args before validation — it's not part of the tool schema
+		const argsForValidation = { ...toolCall.arguments };
+		delete argsForValidation.async;
+		const validatedArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForValidation });
+
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
 				{

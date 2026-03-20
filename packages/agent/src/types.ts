@@ -205,12 +205,22 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Return an `AfterToolCallResult` to override parts of the executed tool result:
 	 * - `content` replaces the full content array
 	 * - `details` replaces the full details payload
-	 * - `isError` replaces the error flag
+	 - `isError` replaces the error flag
 	 *
 	 * Any omitted fields keep their original values. No deep merge is performed.
 	 * The hook receives the agent abort signal and is responsible for honoring it.
 	 */
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+
+	/**
+	 * Called when an async background tool completes.
+	 *
+	 * Use this to collect completed async tool results and feed them back
+	 * into the conversation (e.g., via followUp messages).
+	 *
+	 * The result is a ToolResultMessage ready to be added to the context.
+	 */
+	onAsyncToolComplete?: (result: ToolResultMessage) => void;
 }
 
 /**
@@ -269,6 +279,16 @@ export interface AgentToolResult<T> {
 // Callback for streaming tool execution updates
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
+/**
+ * Async execution mode for tools.
+ *
+ * - `"opt-in"`: tool supports async. Agent can pass `async: true` to run in background.
+ *   The `async` parameter is injected into the tool schema sent to the LLM.
+ * - `"always"`: tool always runs in background. No `async` parameter exposed to the LLM.
+ *   The agent gets a pending placeholder immediately and the real result injects later.
+ */
+export type ToolAsyncMode = "opt-in" | "always";
+
 // AgentTool extends Tool but adds the execute function
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
@@ -283,6 +303,14 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	suppress?: "enable";
 	/** Custom text to replace the default "Working..." message while the agent is in control. */
 	workingText?: string;
+	/**
+	 * Async execution mode.
+	 *
+	 * - `"opt-in"`: agent can pass `async: true` in the tool call to run in background.
+	 * - `"always"`: tool always runs in background. Agent never decides.
+	 * - `undefined`: not async-capable (default).
+	 */
+	async?: ToolAsyncMode;
 }
 
 // AgentContext is like Context but uses AgentTool

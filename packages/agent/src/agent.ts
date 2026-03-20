@@ -12,6 +12,7 @@ import {
 	streamSimple,
 	type TextContent,
 	type ThinkingBudgets,
+	type ToolResultMessage,
 	type Transport,
 } from "@mariozechner/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
@@ -111,6 +112,9 @@ export interface AgentOptions {
 
 	/** Called after a tool finishes executing, before final tool events are emitted. */
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+
+	/** Called when an async background tool completes. Use to feed results back via followUp. */
+	onAsyncToolComplete?: (result: ToolResultMessage) => void;
 }
 
 export class Agent {
@@ -152,6 +156,7 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	private _onAsyncToolComplete?: (result: ToolResultMessage) => void;
 
 	constructor(opts: AgentOptions = {}) {
 		this._state = { ...this._state, ...opts.initialState };
@@ -169,6 +174,7 @@ export class Agent {
 		this._toolExecution = opts.toolExecution ?? "parallel";
 		this._beforeToolCall = opts.beforeToolCall;
 		this._afterToolCall = opts.afterToolCall;
+		this._onAsyncToolComplete = opts.onAsyncToolComplete;
 	}
 
 	/**
@@ -251,6 +257,10 @@ export class Agent {
 			| undefined,
 	) {
 		this._afterToolCall = value;
+	}
+
+	setOnAsyncToolComplete(value: ((result: ToolResultMessage) => void) | undefined) {
+		this._onAsyncToolComplete = value;
 	}
 
 	get state(): AgentState {
@@ -539,6 +549,7 @@ export class Agent {
 			toolExecution: this._toolExecution,
 			beforeToolCall: this._beforeToolCall,
 			afterToolCall: this._afterToolCall,
+			onAsyncToolComplete: this._onAsyncToolComplete,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
