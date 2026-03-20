@@ -2198,8 +2198,10 @@ export class InteractiveMode {
 						if (content.type === "toolCall") {
 							if (!this.pendingTools.has(content.id)) {
 								const toolDef = this.getRegisteredToolDefinition(content.name);
+								// Args can override suppress
+								const suppress = content.arguments?.suppress === true ? "enable" : toolDef?.suppress;
 								// Skip rendering if tool has suppress enabled
-								if (toolDef?.suppress === "enable") {
+								if (suppress === "enable") {
 									// Track as suppressed (null component) so we don't re-check
 									this.pendingTools.set(content.id, null as any);
 									continue;
@@ -2273,8 +2275,11 @@ export class InteractiveMode {
 
 			case "tool_execution_start": {
 				const toolDef = this.getRegisteredToolDefinition(event.toolName);
+				// Args can override suppress and workingText
+				const suppress = event.args?.suppress === true ? "enable" : toolDef?.suppress;
+				const workingText = event.args?.workingText ?? toolDef?.workingText;
 				// Create a separate loader for tool working text (below the main loader)
-				if (toolDef?.workingText) {
+				if (workingText) {
 					if (this.toolWorkingTextLoader) {
 						this.toolWorkingTextLoader.stop();
 					}
@@ -2282,12 +2287,12 @@ export class InteractiveMode {
 						this.ui,
 						(spinner) => theme.fg("accent", spinner),
 						(text) => theme.fg("muted", text),
-						toolDef.workingText,
+						workingText,
 					);
 					this.statusContainer.addChild(this.toolWorkingTextLoader);
 				}
 				// Skip rendering if tool has suppress enabled
-				if (toolDef?.suppress === "enable") {
+				if (suppress === "enable") {
 					this.pendingTools.set(event.toolCallId, null as any);
 					break;
 				}

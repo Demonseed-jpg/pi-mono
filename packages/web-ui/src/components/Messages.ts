@@ -115,8 +115,10 @@ export class AssistantMessage extends LitElement {
 			} else if (chunk.type === "toolCall") {
 				if (!this.hideToolCalls) {
 					const tool = this.tools?.find((t) => t.name === chunk.name);
+					// Args can override suppress
+					const suppress = chunk.arguments?.suppress === true ? "enable" : tool?.suppress;
 					// Skip rendering if tool has suppress enabled
-					if (tool?.suppress === "enable") {
+					if (suppress === "enable") {
 						continue;
 					}
 					const pending = this.pendingToolCalls?.has(chunk.id) ?? false;
