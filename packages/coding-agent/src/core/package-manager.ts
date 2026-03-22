@@ -1190,19 +1190,29 @@ export class DefaultPackageManager implements PackageManager {
 		return { type: "local", path: source };
 	}
 
-	private async installedNpmMatchesPinnedVersion(source: NpmSource, installedPath: string): Promise<boolean> {
-		const installedVersion = this.getInstalledNpmVersion(installedPath);
-		if (!installedVersion) {
-			return false;
-		}
+	  private async installedNpmMatchesPinnedVersion(source: NpmSource, installedPath: string): Promise<boolean> {
+    const installedVersion = this.getInstalledNpmVersion(installedPath);
+    if (!installedVersion) {
+      return false;
+    }
 
-		const { version: pinnedVersion } = this.parseNpmSpec(source.spec);
-		if (!pinnedVersion) {
-			return true;
-		}
+    const { version: pinnedVersion } = this.parseNpmSpec(source.spec);
+    if (!pinnedVersion) {
+      return true;
+    }
 
-		return installedVersion === pinnedVersion;
-	}
+    if (!pinnedVersion.includes(".")) {
+      try {
+        const resolvedVersion = await this.getLatestNpmVersion(source.name, pinnedVersion);
+        return resolvedVersion === installedVersion;
+      } catch {
+        return false;
+      }
+    }
+
+    return installedVersion === pinnedVersion;
+  }
+
 
 	private async npmHasAvailableUpdate(source: NpmSource, installedPath: string): Promise<boolean> {
 		if (isOfflineModeEnabled()) {
@@ -1234,14 +1244,14 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private async getLatestNpmVersion(packageName: string): Promise<string> {
-		const response = await fetch(`https://registry.npmjs.org/${packageName}/latest`, {
-			signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
-		});
-		if (!response.ok) throw new Error(`Failed to fetch npm registry: ${response.status}`);
-		const data = (await response.json()) as { version: string };
-		return data.version;
-	}
+	  private async getLatestNpmVersion(packageName: string, tag = "latest"): Promise<string> {
+    const result = await this.runCommandCapture("npm", ["view", packageName + "@" + tag, "version"], {
+      timeoutMs: NETWORK_TIMEOUT_MS,
+    });
+    if (!result) throw new Error("No version found for " + packageName + "@" + tag);
+    return result.trim();
+  }
+
 
 	private async gitHasAvailableUpdate(installedPath: string): Promise<boolean> {
 		if (isOfflineModeEnabled()) {
